@@ -2,7 +2,7 @@
 D=test_rep
 mkdir $D
 
-# CUDA_VISIBLE_DEVICES=2 python3 github/MMCoQA/train_retriever.py \
+# CUDA_VISIBLE_DEVICES=2 python3 github_code/MMCoQA/train_retriever.py \
 # --train_file ./MMCoQA/MMCoQA_train.txt \
 # --dev_file ./MMCoQA/MMCoQA_dev.txt \
 # --test_file ./MMCoQA/MMCoQA_test.txt \
@@ -16,7 +16,7 @@ mkdir $D
 # --overwrite_output_dir True \
 
 
-# CUDA_VISIBLE_DEVICES=2 python3 github/MMCoQA/train_retriever.py \
+# CUDA_VISIBLE_DEVICES=2 python3 github_code/MMCoQA/train_retriever.py \
 # --gen_passage_rep True \
 # --retrieve_checkpoint ./$D/checkpoint-5061 \
 # --train_file ./MMCoQA/MMCoQA_train.txt \
@@ -33,7 +33,7 @@ mkdir $D
 # --gen_passage_rep_output ./$D/dev_blocks.txt \
 
 
-CUDA_VISIBLE_DEVICES=2 python3 github/MMCoQA/train_pipeline.py \
+CUDA_VISIBLE_DEVICES=2 python3 github_code/MMCoQA/train_pipeline.py \
 --train_file ./MMCoQA/MMCoQA_train.txt \
 --dev_file ./MMCoQA/MMCoQA_dev.txt \
 --test_file ./MMCoQA/MMCoQA_test.txt \
@@ -48,9 +48,9 @@ CUDA_VISIBLE_DEVICES=2 python3 github/MMCoQA/train_pipeline.py \
 --output_dir $D \
 --num_train_epochs 3 \
 --retrieve_tokenizer_dir $D \
---do_train False \
+--do_train True \
 
-# CUDA_VISIBLE_DEVICES=2 python3 code/MMCoQA/train_pipeline.py \
+# CUDA_VISIBLE_DEVICES=2 python3 github_code/MMCoQA/train_pipeline.py \
 # --do_train False --do_eval False --do_test True --best_global_step 12000 \
 # --train_file ./MMCoQA/MMCoQA_train.txt \
 # --dev_file ./MMCoQA/MMCoQA_dev.txt \
