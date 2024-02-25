@@ -45,6 +45,9 @@ from utils import (LazyQuacDatasetGlobal, RawResult,
 from retriever_utils import RetrieverDataset
 from modeling import Pipeline, BertForOrconvqaGlobal, BertForRetrieverOnlyPositivePassage,AlbertForRetrieverOnlyPositivePassage
 from scorer import quac_eval
+import train_options
+import warnings
+warnings.filterwarnings("ignore")
 
 
 # In[2]:
@@ -72,19 +75,6 @@ def set_seed(args):
 
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
-
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-
-# In[4]:
 
 
 def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
@@ -591,615 +581,422 @@ def get_passage(i, args):
 get_passages = np.vectorize(get_passage)
 
 
-# In[9]:
+if __name__ == "__main__":
+    args, unknown = train_options.pipeline_args()
+
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
+        raise ValueError(
+            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
+    args.retriever_tokenizer_dir = os.path.join(args.output_dir, 'retriever')
+    args.reader_tokenizer_dir = os.path.join(args.output_dir, 'reader')
+    # Setup distant debugging if needed
+    if args.server_ip and args.server_port:
+        # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
+        import ptvsd
+        print("Waiting for debugger attach")
+        ptvsd.enable_attach(
+            address=(args.server_ip, args.server_port), redirect_output=True)
+        ptvsd.wait_for_attach()
+
+    # Setup CUDA, GPU & distributed training
+    # we now only support joint training on a single card
+    # we will request two cards, one for torch and the other one for faiss
+    if args.local_rank == -1 or args.no_cuda:
+        device = torch.device(
+            "cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+        # args.n_gpu = torch.cuda.device_count()
+        args.n_gpu = 1
+        # torch.cuda.set_device(0)
+    else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        torch.cuda.set_device(args.local_rank)
+        device = torch.device("cuda", args.local_rank)
+        torch.distributed.init_process_group(backend='nccl')
+        args.n_gpu = 1
+    args.device = device
+
+    # Setup logging
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+                        datefmt='%m/%d/%Y %H:%M:%S',
+                        level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
+    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
+                args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), args.fp16)
+
+    # Set seed
+    set_seed(args)
+
+    # Load pretrained model and tokenizer
+    if args.local_rank not in [-1, 0]:
+        # Make sure only the first process in distributed training will download model & vocab
+        torch.distributed.barrier()
 
 
-parser = argparse.ArgumentParser()
+    model = Pipeline()
 
-# arguments shared by the retriever and reader
+    args.retriever_model_type = args.retriever_model_type.lower()
+    retriever_config_class, retriever_model_class, retriever_tokenizer_class = MODEL_CLASSES['retriever']
+    retriever_config = retriever_config_class.from_pretrained(args.retrieve_checkpoint)
 
-parser.add_argument("--train_file", default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/QA pairs/MMCoQA_train.txt',
-                    type=str, required=False,
-                    help="open retrieval quac json for training. ")
-parser.add_argument("--dev_file", default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/QA pairs/MMCoQA_dev.txt',
-                    type=str, required=False,
-                    help="open retrieval quac json for predictions.")
-parser.add_argument("--test_file", default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/QA pairs/MMCoQA_test.txt',
-                    type=str, required=False,
-                    help="open retrieval quac json for predictions.")
+    # load pretrained retriever
+    retriever_tokenizer = retriever_tokenizer_class.from_pretrained(args.retrieve_tokenizer_dir)
+    retriever_model = retriever_model_class.from_pretrained(args.retrieve_checkpoint, force_download=True)
 
-parser.add_argument("--passages_file", 
-                    default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/texts/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_texts.jsonl', type=str,
-                    help="the file contains passages")
-parser.add_argument("--tables_file", 
-                    default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/tables/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_tables.jsonl', type=str,
-                    help="the file contains passages")
-parser.add_argument("--images_file", 
-                    default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/images/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_images.jsonl', type=str,
-                    help="the file contains passages")
-
-parser.add_argument("--qrels", default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/QA pairs/qrels.txt', type=str, required=False,
-                    help="qrels to evaluate open retrieval")
-parser.add_argument("--images_path", 
-                    default="/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/images/final_dataset_images/", type=str,
-                    help="the path to images")
-
-parser.add_argument("--gen_passage_rep_output", 
-                    default='./retriever_release_test/dev_blocks.txt', type=str,
-                    help="passage representations")
-parser.add_argument("--output_dir", default='./release_test', type=str, required=False,
-                    help="The output directory where the model checkpoints and predictions will be written.")
-parser.add_argument("--load_small", default=False, type=str2bool, required=False,
-                    help="whether to load just a small portion of data during development")
-parser.add_argument("--num_workers", default=2, type=int, required=False,
-                    help="number of workers for dataloader")
-
-parser.add_argument("--global_mode", default=True, type=str2bool, required=False,
-                    help="maxmize the prob of the true answer given all passages")
-parser.add_argument("--history_num", default=1, type=int, required=False,
-                    help="number of history turns to use")
-parser.add_argument("--prepend_history_questions", default=True, type=str2bool, required=False,
-                    help="whether to prepend history questions to the current question")
-parser.add_argument("--prepend_history_answers", default=False, type=str2bool, required=False,
-                    help="whether to prepend history answers to the current question")
-
-parser.add_argument("--do_train", default=True, type=str2bool,
-                    help="Whether to run training.")
-parser.add_argument("--do_eval", default=True, type=str2bool,
-                    help="Whether to run eval on the dev set.")
-parser.add_argument("--do_test", default=True, type=str2bool,
-                    help="Whether to run eval on the test set.")
-parser.add_argument("--best_global_step", default=12000, type=int, required=False,
-                    help="used when only do_test")
-parser.add_argument("--evaluate_during_training", default=False, type=str2bool,
-                    help="Rul evaluation during training at each logging step.")
-parser.add_argument("--do_lower_case", default=True, type=str2bool,
-                    help="Set this flag if you are using an uncased model.")
-
-parser.add_argument("--per_gpu_train_batch_size", default=1, type=int,
-                    help="Batch size per GPU/CPU for training.")
-parser.add_argument("--per_gpu_eval_batch_size", default=1, type=int,
-                    help="Batch size per GPU/CPU for evaluation.")
-parser.add_argument("--learning_rate", default=5e-5, type=float,
-                    help="The initial learning rate for Adam.")
-parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
-                    help="Number of updates steps to accumulate before performing a backward/update pass.")
-parser.add_argument("--weight_decay", default=0.0, type=float,
-                    help="Weight decay if we apply some.")
-parser.add_argument("--adam_epsilon", default=1e-8, type=float,
-                    help="Epsilon for Adam optimizer.")
-parser.add_argument("--max_grad_norm", default=1.0, type=float,
-                    help="Max gradient norm.")
-parser.add_argument("--num_train_epochs", default=3.0, type=float,
-                    help="Total number of training epochs to perform.")
-parser.add_argument("--max_steps", default=-1, type=int,
-                    help="If > 0: set total number of training steps to perform. Override num_train_epochs.")
-parser.add_argument("--warmup_steps", default=0, type=int,
-                    help="Linear warmup over warmup_steps.")
-parser.add_argument("--warmup_portion", default=0.1, type=float,
-                    help="Linear warmup over warmup_steps (=t_total * warmup_portion). override warmup_steps ")
-parser.add_argument("--verbose_logging", action='store_true',
-                    help="If true, all of the warnings related to data processing will be printed. "
-                         "A number of warnings are expected for a normal SQuAD evaluation.")
-
-parser.add_argument('--logging_steps', type=int, default=10,
-                    help="Log every X updates steps.")
-parser.add_argument('--save_steps', type=int, default=4000,
-                    help="Save checkpoint every X updates steps.")
-parser.add_argument("--eval_all_checkpoints", default=True, type=str2bool,
-                    help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
-parser.add_argument("--no_cuda", default=False, type=str2bool,
-                    help="Whether not to use CUDA when available")
-parser.add_argument('--overwrite_output_dir', default=False, type=str2bool,
-                    help="Overwrite the content of the output directory")
-parser.add_argument('--overwrite_cache', action='store_true',
-                    help="Overwrite the cached training and evaluation sets")
-parser.add_argument('--seed', type=int, default=42,
-                    help="random seed for initialization")
-
-parser.add_argument("--local_rank", type=int, default=-1,
-                    help="local_rank for distributed training on gpus")
-parser.add_argument('--fp16', default=False, type=str2bool,
-                    help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
-parser.add_argument('--fp16_opt_level', type=str, default='O1',
-                    help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                         "See details at https://nvidia.github.io/apex/amp.html")
-parser.add_argument('--server_ip', type=str, default='',
-                    help="Can be used for distant debugging.")
-parser.add_argument('--server_port', type=str, default='',
-                    help="Can be used for distant debugging.")
-
-# retriever arguments
-parser.add_argument("--retriever_config_name", default="", type=str,
-                    help="Pretrained config name or path if not the same as model_name")
-parser.add_argument("--retriever_model_type", default='albert', type=str, required=False,
-                    help="retriever model type")
-parser.add_argument("--retriever_model_name_or_path", default='albert-base-v2', type=str, required=False,
-                    help="retriever model name")
-parser.add_argument("--retriever_tokenizer_name", default="albert-base-v2", type=str,
-                    help="Pretrained tokenizer name or path if not the same as model_name")
-parser.add_argument("--retriever_cache_dir", default="../huggingface_cache/albert-base-v2/", type=str,
-                    help="Where do you want to store the pre-trained models downloaded from s3")
-parser.add_argument("--retrieve_checkpoint",
-                    default='./retriever_release_test/checkpoint-5061', type=str,
-                    help="generate query/passage representations with this checkpoint")
-parser.add_argument("--retrieve_tokenizer_dir",
-                    default='./retriever_release_test', type=str,
-                    help="dir that contains tokenizer files")
-
-parser.add_argument("--given_query", default=True, type=str2bool,
-                    help="Whether query is given.")
-parser.add_argument("--given_passage", default=False, type=str2bool,
-                    help="Whether passage is given. Passages are not given when jointly train")
-parser.add_argument("--is_pretraining", default=False, type=str2bool,
-                    help="Whether is pretraining. We fine tune the query encoder in retriever")
-parser.add_argument("--include_first_for_retriever", default=True, type=str2bool,
-                    help="include the first question in a dialog in addition to history_num for retriever (not reader)")
-# parser.add_argument("--only_positive_passage", default=True, type=str2bool,
-#                     help="we only pass the positive passages, the rest of the passges in the batch are considered as negatives")
-parser.add_argument("--retriever_query_max_seq_length", default=30, type=int,
-                    help="The maximum input sequence length of query.")
-parser.add_argument("--retriever_passage_max_seq_length", default=128, type=int,
-                    help="The maximum input sequence length of passage (384 + [CLS] + [SEP]).")
-parser.add_argument("--proj_size", default=128, type=int,
-                    help="The size of the query/passage rep after projection of [CLS] rep.")
-parser.add_argument("--top_k_for_retriever", default=2000, type=int,
-                    help="retrieve top k passages for a query, these passages will be used to update the query encoder")
-parser.add_argument("--use_retriever_prob", default=True, type=str2bool,
-                    help="include albert retriever probs in final answer ranking")
-
-# reader arguments
-parser.add_argument("--reader_config_name", default="", type=str,
-                    help="Pretrained config name or path if not the same as model_name")
-parser.add_argument("--reader_model_name_or_path", default='bert-base-uncased', type=str, required=False,
-                    help="reader model name")
-parser.add_argument("--reader_model_type", default='bert', type=str, required=False,
-                    help="reader model type")
-parser.add_argument("--reader_tokenizer_name", default="bert-base-uncased", type=str,
-                    help="Pretrained tokenizer name or path if not the same as model_name")
-parser.add_argument("--reader_cache_dir", default="../huggingface_cache/bert-base-uncased/", type=str,
-                    help="Where do you want to store the pre-trained models downloaded from s3")
-parser.add_argument("--reader_max_seq_length", default=512, type=int,
-                    help="The maximum total input sequence length after WordPiece tokenization. Sequences "
-                         "longer than this will be truncated, and sequences shorter than this will be padded.")
-parser.add_argument("--doc_stride", default=384, type=int,
-                    help="When splitting up a long document into chunks, how much stride to take between chunks.")
-parser.add_argument('--version_2_with_negative', default=False, type=str2bool, required=False,
-                    help='If true, the SQuAD examples contain some that do not have an answer.')
-parser.add_argument('--null_score_diff_threshold', type=float, default=0.0,
-                    help="If null_score - best_non_null is greater than the threshold predict null.")
-parser.add_argument("--reader_max_query_length", default=125, type=int,
-                    help="The maximum number of tokens for the question. Questions longer than this will "
-                         "be truncated to this length.")
-parser.add_argument("--n_best_size", default=20, type=int,
-                    help="The total number of n-best predictions to generate in the nbest_predictions.json output file.")
-parser.add_argument("--max_answer_length", default=40, type=int,
-                    help="The maximum length of an answer that can be generated. This is needed because the start "
-                         "and end predictions are not conditioned on one another.")
-parser.add_argument("--qa_loss_factor", default=1.0, type=float,
-                    help="total_loss = qa_loss_factor * qa_loss + retrieval_loss_factor * retrieval_loss")
-parser.add_argument("--retrieval_loss_factor", default=1.0, type=float,
-                    help="total_loss = qa_loss_factor * qa_loss + retrieval_loss_factor * retrieval_loss")
-parser.add_argument("--top_k_for_reader", default=10, type=int,
-                    help="update the reader with top k passages")
-parser.add_argument("--use_rerank_prob", default=True, type=str2bool,
-                    help="include rerank probs in final answer ranking")
-
-args, unknown = parser.parse_known_args()
-
-if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
-    raise ValueError(
-        "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
-args.retriever_tokenizer_dir = os.path.join(args.output_dir, 'retriever')
-args.reader_tokenizer_dir = os.path.join(args.output_dir, 'reader')
-# Setup distant debugging if needed
-if args.server_ip and args.server_port:
-    # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
-    import ptvsd
-    print("Waiting for debugger attach")
-    ptvsd.enable_attach(
-        address=(args.server_ip, args.server_port), redirect_output=True)
-    ptvsd.wait_for_attach()
-
-# Setup CUDA, GPU & distributed training
-# we now only support joint training on a single card
-# we will request two cards, one for torch and the other one for faiss
-if args.local_rank == -1 or args.no_cuda:
-    device = torch.device(
-        "cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-    # args.n_gpu = torch.cuda.device_count()
-    args.n_gpu = 1
-    # torch.cuda.set_device(0)
-else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    torch.distributed.init_process_group(backend='nccl')
-    args.n_gpu = 1
-args.device = device
-
-# Setup logging
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
-logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
-               args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), args.fp16)
-
-# Set seed
-set_seed(args)
-
-# Load pretrained model and tokenizer
-if args.local_rank not in [-1, 0]:
-    # Make sure only the first process in distributed training will download model & vocab
-    torch.distributed.barrier()
+    model.retriever = retriever_model
+    # do not need and do not tune passage encoder
+    model.retriever.passage_encoder = None
+    model.retriever.passage_proj = None
+    model.retriever.image_encoder = None
+    model.retriever.image_proj = None
 
 
-model = Pipeline()
+    args.reader_model_type = args.reader_model_type.lower()
+    reader_config_class, reader_model_class, reader_tokenizer_class = MODEL_CLASSES['reader']
+    reader_config = reader_config_class.from_pretrained(args.reader_config_name if args.reader_config_name else args.reader_model_name_or_path,
+                                                        cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
+    reader_config.num_qa_labels = 2
+    # this not used for BertForOrconvqaGlobal
+    reader_config.num_retrieval_labels = 2
+    reader_config.qa_loss_factor = args.qa_loss_factor
+    reader_config.retrieval_loss_factor = args.retrieval_loss_factor
+    reader_config.proj_size=args.proj_size
 
-args.retriever_model_type = args.retriever_model_type.lower()
-retriever_config_class, retriever_model_class, retriever_tokenizer_class = MODEL_CLASSES['retriever']
-retriever_config = retriever_config_class.from_pretrained(args.retrieve_checkpoint)
-
-# load pretrained retriever
-retriever_tokenizer = retriever_tokenizer_class.from_pretrained(args.retrieve_tokenizer_dir)
-retriever_model = retriever_model_class.from_pretrained(args.retrieve_checkpoint, force_download=True)
-
-model.retriever = retriever_model
-# do not need and do not tune passage encoder
-model.retriever.passage_encoder = None
-model.retriever.passage_proj = None
-model.retriever.image_encoder = None
-model.retriever.image_proj = None
-
-
-args.reader_model_type = args.reader_model_type.lower()
-reader_config_class, reader_model_class, reader_tokenizer_class = MODEL_CLASSES['reader']
-reader_config = reader_config_class.from_pretrained(args.reader_config_name if args.reader_config_name else args.reader_model_name_or_path,
+    reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
+                                                            do_lower_case=args.do_lower_case,
+                                                            cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
+    reader_model = reader_model_class.from_pretrained(args.reader_model_name_or_path,
+                                                    from_tf=bool(
+                                                        '.ckpt' in args.reader_model_name_or_path),
+                                                    config=reader_config,
                                                     cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
-reader_config.num_qa_labels = 2
-# this not used for BertForOrconvqaGlobal
-reader_config.num_retrieval_labels = 2
-reader_config.qa_loss_factor = args.qa_loss_factor
-reader_config.retrieval_loss_factor = args.retrieval_loss_factor
-reader_config.proj_size=args.proj_size
 
-reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
-                                                          do_lower_case=args.do_lower_case,
-                                                          cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
-reader_model = reader_model_class.from_pretrained(args.reader_model_name_or_path,
-                                                  from_tf=bool(
-                                                      '.ckpt' in args.reader_model_name_or_path),
-                                                  config=reader_config,
-                                                  cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
+    model.reader = reader_model
 
-model.reader = reader_model
+    if args.local_rank == 0:
+        # Make sure only the first process in distributed training will download model & vocab
+        torch.distributed.barrier()
 
-if args.local_rank == 0:
-    # Make sure only the first process in distributed training will download model & vocab
-    torch.distributed.barrier()
+    model.to(args.device)
 
-model.to(args.device)
+    logger.info("Training/evaluation parameters %s", args)
 
-logger.info("Training/evaluation parameters %s", args)
-
-# Before we do anything with models, we want to ensure that we get fp16 execution of torch.einsum if args.fp16 is set.
-# Otherwise it'll default to "promote" mode, and we'll get fp32 operations. Note that running `--fp16_opt_level="O2"` will
-# remove the need for this code, but it is still valid.
-if args.fp16:
-    try:
-        import apex
-        apex.amp.register_half_function(torch, 'einsum')
-    except ImportError:
-        raise ImportError(
-            "Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-
-logger.info(f'loading passage ids')
-
-
-itemid_modalities=[]
-
-#load passages to passages_dict
-passages_dict={}
-with open(args.passages_file,'r') as f:
-    lines=f.readlines()
-    for line in lines:
-        line=json.loads(line.strip())
-        passages_dict[line['id']]=line['text']
-        itemid_modalities.append('text')
-#load tables to tables_dict
-# !!!!!!!!!!!!!!!!!!!!!!!还需要精致的修改
-tables_dict={}
-with open(args.tables_file,'r') as f:
-    lines=f.readlines()
-    for line in lines:
-        line=json.loads(line.strip())
-        table_context = ''
-        for row_data in line['table']["table_rows"]:
-            for cell in row_data:
-                table_context=table_context+" "+cell['text']
-        tables_dict[line['id']]=table_context
-        itemid_modalities.append('table')
-#load images to images_dict
-# !!!!!!!!!!!!!!!!!!!!!!!还需要精致的修改
-images_dict={}
-# with open(args.images_file,'r') as f:
-#     lines=f.readlines()
-#     for line in lines:
-#         line=json.loads(line.strip())
-#         images_dict[line['id']]=args.images_path+line['path']
-
-
-#         itemid_modalities.append('image')
-with open(args.images_file,'r') as f:
-    lines=f.readlines()
-    for line in lines:
+    # Before we do anything with models, we want to ensure that we get fp16 execution of torch.einsum if args.fp16 is set.
+    # Otherwise it'll default to "promote" mode, and we'll get fp32 operations. Note that running `--fp16_opt_level="O2"` will
+    # remove the need for this code, but it is still valid.
+    if args.fp16:
         try:
+            import apex
+            apex.amp.register_half_function(torch, 'einsum')
+        except ImportError:
+            raise ImportError(
+                "Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+
+    logger.info(f'loading passage ids')
+
+
+    itemid_modalities=[]
+
+    #load passages to passages_dict
+    passages_dict={}
+    with open(args.passages_file,'r') as f:
+        lines=f.readlines()
+        for line in lines:
             line=json.loads(line.strip())
-            img_path = os.path.join(args.images_path, line['path'])
-            img_ = Image.open(img_path).convert("RGB")
-            images_dict[line['id']] = img_path
-            itemid_modalities.append('image')
-        except Exception as e:
-            print(e, "\t", img_path)
-            pass
+            passages_dict[line['id']]=line['text']
+            itemid_modalities.append('text')
+    #load tables to tables_dict
+    # !!!!!!!!!!!!!!!!!!!!!!!还需要精致的修改
+    tables_dict={}
+    with open(args.tables_file,'r') as f:
+        lines=f.readlines()
+        for line in lines:
+            line=json.loads(line.strip())
+            table_context = ''
+            for row_data in line['table']["table_rows"]:
+                for cell in row_data:
+                    table_context=table_context+" "+cell['text']
+            tables_dict[line['id']]=table_context
+            itemid_modalities.append('table')
+    #load images to images_dict
+    # !!!!!!!!!!!!!!!!!!!!!!!还需要精致的修改
+    images_dict={}
+    # with open(args.images_file,'r') as f:
+    #     lines=f.readlines()
+    #     for line in lines:
+    #         line=json.loads(line.strip())
+    #         images_dict[line['id']]=args.images_path+line['path']
+
+
+    #         itemid_modalities.append('image')
+    with open(args.images_file,'r') as f:
+        lines=f.readlines()
+        for line in lines:
+            try:
+                line=json.loads(line.strip())
+                img_path = os.path.join(args.images_path, line['path'])
+                img_ = Image.open(img_path).convert("RGB")
+                images_dict[line['id']] = img_path
+                itemid_modalities.append('image')
+            except Exception as e:
+                print(e, "\t", img_path)
+                pass
 
 
 
-# 还需要精致的修改
-image_answers_set=set()
-with open(args.train_file, "r") as f:
-    lines=f.readlines()
-    for line in lines:
-        image_answers_set.add(json.loads(line.strip())['answer'][0]['answer'])
+    # 还需要精致的修改
+    image_answers_set=set()
+    with open(args.train_file, "r") as f:
+        lines=f.readlines()
+        for line in lines:
+            image_answers_set.add(json.loads(line.strip())['answer'][0]['answer'])
 
-image_answers_str=''
-for s in image_answers_set:
-    image_answers_str=image_answers_str+" "+str(s)
-
-
-images_titles={}
-with open(args.images_file,'r') as f:
-    lines=f.readlines()
-    for line in lines:
-        line=json.loads(line.strip())
-        images_titles[line['id']]=line['title']+" "+image_answers_str
+    image_answers_str=''
+    for s in image_answers_set:
+        image_answers_str=image_answers_str+" "+str(s)
 
 
-
-item_ids, item_reps = [], []
-with open(args.gen_passage_rep_output) as fin:
-    for line in tqdm(fin):
-        dic = json.loads(line.strip())
-        item_ids.append(dic['id'])
-        item_reps.append(dic['rep'])
-item_reps = np.asarray(item_reps, dtype='float32')
-item_ids=np.asarray(item_ids)
-
-logger.info('constructing passage faiss_index')
-faiss_res = faiss.StandardGpuResources() 
-index = faiss.IndexFlatIP(args.proj_size)
-index.add(item_reps)
-#gpu_index = faiss.index_cpu_to_gpu(faiss_res, 0, index)
-gpu_index=index
+    images_titles={}
+    with open(args.images_file,'r') as f:
+        lines=f.readlines()
+        for line in lines:
+            line=json.loads(line.strip())
+            images_titles[line['id']]=line['title']+" "+image_answers_str
 
 
 
-logger.info(f'loading qrels from {args.qrels}')
-with open(args.qrels) as handle:
-    qrels = json.load(handle)
+    item_ids, item_reps = [], []
+    with open(args.gen_passage_rep_output) as fin:
+        for line in tqdm(fin):
+            dic = json.loads(line.strip())
+            item_ids.append(dic['id'])
+            item_reps.append(dic['rep'])
+    item_reps = np.asarray(item_reps, dtype='float32')
+    item_ids=np.asarray(item_ids)
 
-item_id_to_idx = {}
-for i, pid in enumerate(item_ids):
-    item_id_to_idx[pid] = i
-
-qrels_data, qrels_row_idx, qrels_col_idx = [], [], []
-qid_to_idx = {}
-for i, (qid, v) in enumerate(qrels.items()):
-    qid_to_idx[qid] = i
-    for pid in v.keys():
-        qrels_data.append(1)
-        qrels_row_idx.append(i)
-        qrels_col_idx.append(item_id_to_idx[pid])
-qrels_data.append(0)
-qrels_row_idx.append(5752)
-qrels_col_idx.append(285384)
-
-qrels_sparse_matrix = sp.sparse.csr_matrix(
-    (qrels_data, (qrels_row_idx, qrels_col_idx)))
-evaluator = pytrec_eval.RelevanceEvaluator(qrels, {'ndcg', 'set_recall'})
+    logger.info('constructing passage faiss_index')
+    faiss_res = faiss.StandardGpuResources() 
+    index = faiss.IndexFlatIP(args.proj_size)
+    index.add(item_reps)
+    #gpu_index = faiss.index_cpu_to_gpu(faiss_res, 0, index)
+    gpu_index=index
 
 
 
+    logger.info(f'loading qrels from {args.qrels}')
+    with open(args.qrels) as handle:
+        qrels = json.load(handle)
 
-retriever_tokenizer.save_pretrained(args.retriever_tokenizer_dir)
-reader_tokenizer.save_pretrained(args.reader_tokenizer_dir)
+    item_id_to_idx = {}
+    for i, pid in enumerate(item_ids):
+        item_id_to_idx[pid] = i
 
+    qrels_data, qrels_row_idx, qrels_col_idx = [], [], []
+    qid_to_idx = {}
+    for i, (qid, v) in enumerate(qrels.items()):
+        qid_to_idx[qid] = i
+        for pid in v.keys():
+            qrels_data.append(1)
+            qrels_row_idx.append(i)
+            qrels_col_idx.append(item_id_to_idx[pid])
+    qrels_data.append(0)
+    qrels_row_idx.append(5752)
+    qrels_col_idx.append(285384)
 
-
-# Training
-if args.do_train:
-    DatasetClass = RetrieverDataset
-    train_dataset = DatasetClass(args.train_file, retriever_tokenizer,
-                                 args.load_small, args.history_num,
-                                 query_max_seq_length=args.retriever_query_max_seq_length,
-                                 is_pretraining=args.is_pretraining,
-                                 prepend_history_questions=args.prepend_history_questions,
-                                 prepend_history_answers=args.prepend_history_answers,
-                                 given_query=True,
-                                 given_passage=False, 
-                                 include_first_for_retriever=args.include_first_for_retriever)
-    global_step, tr_loss = train(
-        args, train_dataset, model, retriever_tokenizer, reader_tokenizer)
-    logger.info(" global_step = %s, average loss = %s",
-                global_step, tr_loss)
-
-# Save the trained model and the tokenizer
-# if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-#     # Create output directory if needed
-    # if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-    #     os.makedirs(args.output_dir)
-    # if not os.path.exists(args.retriever_tokenizer_dir) and args.local_rank in [-1, 0]:
-    #     os.makedirs(args.retriever_tokenizer_dir)
-    # if not os.path.exists(args.reader_tokenizer_dir) and args.local_rank in [-1, 0]:
-    #     os.makedirs(args.reader_tokenizer_dir)
-
-    # logger.info("Saving model checkpoint to %s", args.output_dir)
-    # # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-    # # They can then be reloaded using `from_pretrained()`
-    # # Take care of distributed/parallel training
-    # model_to_save = model.module if hasattr(model, 'module') else model
-    # final_checkpoint_output_dir = os.path.join(
-    #     args.output_dir, 'checkpoint-{}'.format(global_step))
-    # final_retriever_model_dir = os.path.join(
-    #     final_checkpoint_output_dir, 'retriever')
-    # final_reader_model_dir = os.path.join(
-    #     final_checkpoint_output_dir, 'reader')
-    # if not os.path.exists(final_checkpoint_output_dir):
-    #     os.makedirs(final_checkpoint_output_dir)
-    # if not os.path.exists(final_retriever_model_dir):
-    #     os.makedirs(final_retriever_model_dir)
-    # if not os.path.exists(final_reader_model_dir):
-    #     os.makedirs(final_reader_model_dir)
-
-    # retriever_model_to_save = model_to_save.retriever
-    # retriever_model_to_save.save_pretrained(
-    #     final_retriever_model_dir)
-    # reader_model_to_save = model_to_save.reader
-    # reader_model_to_save.save_pretrained(final_reader_model_dir)
-
-    # retriever_tokenizer.save_pretrained(args.retriever_tokenizer_dir)
-    # reader_tokenizer.save_pretrained(args.reader_tokenizer_dir)
-
-    # # Good practice: save your training arguments together with the trained model
-    # torch.save(args, os.path.join(
-    #     final_checkpoint_output_dir, 'training_args.bin'))
-
-    # # Load a trained model and vocabulary that you have fine-tuned
-    # model = Pipeline()
-
-    # model.retriever = retriever_model_class.from_pretrained(
-    #     final_retriever_model_dir, force_download=True)
-    # model.retriever.passage_encoder = None
-    # model.retriever.passage_proj = None
-
-    # model.reader = reader_model_class.from_pretrained(
-    #     final_reader_model_dir, force_download=True)
-
-    # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
-    #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
-    # reader_tokenizer = reader_tokenizer_class.from_pretrained(
-    #     args.reader_tokenizer_dir, do_lower_case=args.do_lower_case)
-    # model.to(args.device)
+    qrels_sparse_matrix = sp.sparse.csr_matrix(
+        (qrels_data, (qrels_row_idx, qrels_col_idx)))
+    evaluator = pytrec_eval.RelevanceEvaluator(qrels, {'ndcg', 'set_recall'})
 
 
-# In[11]:
-# Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
 
-results = {}
-max_f1 = 0.0
-best_metrics = {}
-if args.do_eval and args.local_rank in [-1, 0]:
-    # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
-    #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
-    # reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
-    #                                                       do_lower_case=args.do_lower_case,
-    #                                                       cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
-    tb_writer = SummaryWriter(os.path.join(args.output_dir, 'logs'))
-    checkpoints = [args.output_dir]
-    if args.eval_all_checkpoints:
-        checkpoints = sorted(list(os.path.dirname(os.path.dirname(c)) for c in
-                                      glob.glob(args.output_dir + '/*/retriever/' + WEIGHTS_NAME, recursive=False)))
-#         logging.getLogger("transformers.modeling_utils").setLevel(
-#             logging.WARN)  # Reduce model loading logs
 
-    logger.info("Evaluate the following checkpoints: %s", checkpoints)
+    retriever_tokenizer.save_pretrained(args.retriever_tokenizer_dir)
+    reader_tokenizer.save_pretrained(args.reader_tokenizer_dir)
 
-    for checkpoint in checkpoints:
-        # Reload the model
-        global_step = checkpoint.split(
-            '-')[-1] if len(checkpoint) > 1 else ""
-        print(global_step, 'global_step')
+
+
+    # Training
+    if args.do_train:
+        DatasetClass = RetrieverDataset
+        train_dataset = DatasetClass(args.train_file, retriever_tokenizer,
+                                    args.load_small, args.history_num,
+                                    query_max_seq_length=args.retriever_query_max_seq_length,
+                                    is_pretraining=args.is_pretraining,
+                                    prepend_history_questions=args.prepend_history_questions,
+                                    prepend_history_answers=args.prepend_history_answers,
+                                    given_query=True,
+                                    given_passage=False, 
+                                    include_first_for_retriever=args.include_first_for_retriever)
+        global_step, tr_loss = train(
+            args, train_dataset, model, retriever_tokenizer, reader_tokenizer)
+        logger.info(" global_step = %s, average loss = %s",
+                    global_step, tr_loss)
+
+    # Save the trained model and the tokenizer
+    # if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+    #     # Create output directory if needed
+        # if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+        #     os.makedirs(args.output_dir)
+        # if not os.path.exists(args.retriever_tokenizer_dir) and args.local_rank in [-1, 0]:
+        #     os.makedirs(args.retriever_tokenizer_dir)
+        # if not os.path.exists(args.reader_tokenizer_dir) and args.local_rank in [-1, 0]:
+        #     os.makedirs(args.reader_tokenizer_dir)
+
+        # logger.info("Saving model checkpoint to %s", args.output_dir)
+        # # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+        # # They can then be reloaded using `from_pretrained()`
+        # # Take care of distributed/parallel training
+        # model_to_save = model.module if hasattr(model, 'module') else model
+        # final_checkpoint_output_dir = os.path.join(
+        #     args.output_dir, 'checkpoint-{}'.format(global_step))
+        # final_retriever_model_dir = os.path.join(
+        #     final_checkpoint_output_dir, 'retriever')
+        # final_reader_model_dir = os.path.join(
+        #     final_checkpoint_output_dir, 'reader')
+        # if not os.path.exists(final_checkpoint_output_dir):
+        #     os.makedirs(final_checkpoint_output_dir)
+        # if not os.path.exists(final_retriever_model_dir):
+        #     os.makedirs(final_retriever_model_dir)
+        # if not os.path.exists(final_reader_model_dir):
+        #     os.makedirs(final_reader_model_dir)
+
+        # retriever_model_to_save = model_to_save.retriever
+        # retriever_model_to_save.save_pretrained(
+        #     final_retriever_model_dir)
+        # reader_model_to_save = model_to_save.reader
+        # reader_model_to_save.save_pretrained(final_reader_model_dir)
+
+        # retriever_tokenizer.save_pretrained(args.retriever_tokenizer_dir)
+        # reader_tokenizer.save_pretrained(args.reader_tokenizer_dir)
+
+        # # Good practice: save your training arguments together with the trained model
+        # torch.save(args, os.path.join(
+        #     final_checkpoint_output_dir, 'training_args.bin'))
+
+        # # Load a trained model and vocabulary that you have fine-tuned
+        # model = Pipeline()
+
+        # model.retriever = retriever_model_class.from_pretrained(
+        #     final_retriever_model_dir, force_download=True)
+        # model.retriever.passage_encoder = None
+        # model.retriever.passage_proj = None
+
+        # model.reader = reader_model_class.from_pretrained(
+        #     final_reader_model_dir, force_download=True)
+
+        # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
+        #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
+        # reader_tokenizer = reader_tokenizer_class.from_pretrained(
+        #     args.reader_tokenizer_dir, do_lower_case=args.do_lower_case)
+        # model.to(args.device)
+
+
+    # In[11]:
+    # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
+
+    results = {}
+    max_f1 = 0.0
+    best_metrics = {}
+    if args.do_eval and args.local_rank in [-1, 0]:
+        # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
+        #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
+        # reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
+        #                                                       do_lower_case=args.do_lower_case,
+        #                                                       cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
+        tb_writer = SummaryWriter(os.path.join(args.output_dir, 'logs'))
+        checkpoints = [args.output_dir]
+        if args.eval_all_checkpoints:
+            checkpoints = sorted(list(os.path.dirname(os.path.dirname(c)) for c in
+                                        glob.glob(args.output_dir + '/*/retriever/' + WEIGHTS_NAME, recursive=False)))
+    #         logging.getLogger("transformers.modeling_utils").setLevel(
+    #             logging.WARN)  # Reduce model loading logs
+
+        logger.info("Evaluate the following checkpoints: %s", checkpoints)
+
+        for checkpoint in checkpoints:
+            # Reload the model
+            global_step = checkpoint.split(
+                '-')[-1] if len(checkpoint) > 1 else ""
+            print(global_step, 'global_step')
+            model = Pipeline()
+            model.retriever = retriever_model_class.from_pretrained(
+                os.path.join(checkpoint, 'retriever'), force_download=True)
+            model.retriever.passage_encoder = None
+            model.retriever.passage_proj = None
+            model.retriever.image_encoder = None
+            model.retriever.image_proj = None
+            model.reader = reader_model_class.from_pretrained(
+                os.path.join(checkpoint, 'reader'), force_download=True)
+            model.to(args.device)
+
+            # Evaluate
+            result = evaluate(args, model, retriever_tokenizer,
+                            reader_tokenizer, prefix=global_step)
+            if result['f1'] > max_f1:
+                max_f1 = result['f1']
+                best_metrics = copy(result)
+                best_metrics['global_step'] = global_step
+
+            for key, value in result.items():
+                tb_writer.add_scalar(
+                    'eval_{}'.format(key), value, global_step)
+
+            result = dict((k + ('_{}'.format(global_step) if global_step else ''), v)
+                        for k, v in result.items())
+            results.update(result)
+
+        best_metrics_file = os.path.join(
+            args.output_dir, 'predictions', 'best_metrics.json')
+        with open(best_metrics_file, 'w') as fout:
+            json.dump(best_metrics, fout)
+
+        all_results_file = os.path.join(
+            args.output_dir, 'predictions', 'all_results.json')
+        with open(all_results_file, 'w') as fout:
+            json.dump(results, fout)
+
+        logger.info("Results: {}".format(results))
+        logger.info("best metrics: {}".format(best_metrics))
+
+
+    # In[12]:
+
+
+    if args.do_test and args.local_rank in [-1, 0]:    
+        if args.do_eval:
+            best_global_step = best_metrics['global_step'] 
+        else:
+            best_global_step = args.best_global_step
+            # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
+            #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
+            # reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
+            #                                                   do_lower_case=args.do_lower_case,
+            #                                                   cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
+        best_checkpoint = os.path.join(
+            args.output_dir, 'checkpoint-{}'.format(best_global_step))
+        logger.info("Test the best checkpoint: %s", best_checkpoint)
+
         model = Pipeline()
         model.retriever = retriever_model_class.from_pretrained(
-            os.path.join(checkpoint, 'retriever'), force_download=True)
+            os.path.join(best_checkpoint, 'retriever'), force_download=True)
         model.retriever.passage_encoder = None
         model.retriever.passage_proj = None
         model.retriever.image_encoder = None
         model.retriever.image_proj = None
         model.reader = reader_model_class.from_pretrained(
-            os.path.join(checkpoint, 'reader'), force_download=True)
+            os.path.join(best_checkpoint, 'reader'), force_download=True)
         model.to(args.device)
 
         # Evaluate
         result = evaluate(args, model, retriever_tokenizer,
-                          reader_tokenizer, prefix=global_step)
-        if result['f1'] > max_f1:
-            max_f1 = result['f1']
-            best_metrics = copy(result)
-            best_metrics['global_step'] = global_step
+                        reader_tokenizer, prefix='test')
 
-        for key, value in result.items():
-            tb_writer.add_scalar(
-                'eval_{}'.format(key), value, global_step)
+        test_metrics_file = os.path.join(
+            args.output_dir, 'predictions', 'test_metrics.json')
+        with open(test_metrics_file, 'w') as fout:
+            json.dump(result, fout)
 
-        result = dict((k + ('_{}'.format(global_step) if global_step else ''), v)
-                      for k, v in result.items())
-        results.update(result)
-
-    best_metrics_file = os.path.join(
-        args.output_dir, 'predictions', 'best_metrics.json')
-    with open(best_metrics_file, 'w') as fout:
-        json.dump(best_metrics, fout)
-
-    all_results_file = os.path.join(
-        args.output_dir, 'predictions', 'all_results.json')
-    with open(all_results_file, 'w') as fout:
-        json.dump(results, fout)
-
-    logger.info("Results: {}".format(results))
-    logger.info("best metrics: {}".format(best_metrics))
+        logger.info("Test Result: {}".format(result))
 
 
-# In[12]:
-
-
-if args.do_test and args.local_rank in [-1, 0]:    
-    if args.do_eval:
-        best_global_step = best_metrics['global_step'] 
-    else:
-        best_global_step = args.best_global_step
-        # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(
-        #     args.retriever_tokenizer_dir, do_lower_case=args.do_lower_case)
-        # reader_tokenizer = reader_tokenizer_class.from_pretrained(args.reader_tokenizer_name if args.reader_tokenizer_name else args.reader_model_name_or_path,
-        #                                                   do_lower_case=args.do_lower_case,
-        #                                                   cache_dir=args.reader_cache_dir if args.reader_cache_dir else None)
-    best_checkpoint = os.path.join(
-        args.output_dir, 'checkpoint-{}'.format(best_global_step))
-    logger.info("Test the best checkpoint: %s", best_checkpoint)
-
-    model = Pipeline()
-    model.retriever = retriever_model_class.from_pretrained(
-        os.path.join(best_checkpoint, 'retriever'), force_download=True)
-    model.retriever.passage_encoder = None
-    model.retriever.passage_proj = None
-    model.retriever.image_encoder = None
-    model.retriever.image_proj = None
-    model.reader = reader_model_class.from_pretrained(
-        os.path.join(best_checkpoint, 'reader'), force_download=True)
-    model.to(args.device)
-
-    # Evaluate
-    result = evaluate(args, model, retriever_tokenizer,
-                      reader_tokenizer, prefix='test')
-
-    test_metrics_file = os.path.join(
-        args.output_dir, 'predictions', 'test_metrics.json')
-    with open(test_metrics_file, 'w') as fout:
-        json.dump(result, fout)
-
-    logger.info("Test Result: {}".format(result))
-
-
-# In[ ]:
+    # In[ ]:
 
 
 
