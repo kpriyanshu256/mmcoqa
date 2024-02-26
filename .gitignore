@@ -1,3 +1,9 @@
+MMCoQA/
+data/
+sid/
+logs/
+retriever_checkpoint/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
