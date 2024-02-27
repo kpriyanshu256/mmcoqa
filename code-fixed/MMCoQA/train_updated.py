@@ -1,29 +1,29 @@
 from __future__ import absolute_import, division, print_function
 
-import os
 import argparse
-import logging
-import sys
-import random
 import glob
-import timeit
 import json
 import linecache
-import faiss
-import numpy as np
+import logging
+import os
 import pickle as pkl
-from tqdm import tqdm, trange
+import random
+import sys
+import timeit
+from copy import copy
+
+import faiss
+import joblib as jb
+import numpy as np
 import pytrec_eval
 import scipy as sp
-from copy import copy
 from PIL import Image
-import joblib as jb
+from tqdm import tqdm, trange
 
 os.environ['TOKENIZERS_PARALLELISM'] = "False"
 
 import torch
-from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
-                              TensorDataset)
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 
 try:
@@ -31,15 +31,35 @@ try:
 except:
     from tensorboardX import SummaryWriter
 
-from transformers import WEIGHTS_NAME, BertConfig, BertTokenizer, AlbertConfig, AlbertTokenizer, AutoTokenizer
-from transformers import AdamW, get_linear_schedule_with_warmup
-from utils import (LazyQuacDatasetGlobal, RawResult, 
-                   write_predictions, write_final_predictions, write_predictions_v2, 
-                   get_retrieval_metrics, gen_reader_features, gen_reader_features_v2)
+from modeling import (
+    AlbertForRetrieverOnlyPositivePassage,
+    BertForOrconvqaGlobal,
+    BertForOrconvqaGlobal_v2,
+    BertForRetrieverOnlyPositivePassage,
+    Pipeline,
+)
 from retriever_utils import RetrieverDataset
-from modeling import Pipeline, BertForOrconvqaGlobal, BertForRetrieverOnlyPositivePassage,AlbertForRetrieverOnlyPositivePassage, BertForOrconvqaGlobal_v2
 from scorer import quac_eval
-
+from transformers import (
+    WEIGHTS_NAME,
+    AdamW,
+    AlbertConfig,
+    AlbertTokenizer,
+    AutoTokenizer,
+    BertConfig,
+    BertTokenizer,
+    get_linear_schedule_with_warmup,
+)
+from utils import (
+    LazyQuacDatasetGlobal,
+    RawResult,
+    gen_reader_features,
+    gen_reader_features_v2,
+    get_retrieval_metrics,
+    write_final_predictions,
+    write_predictions,
+    write_predictions_v2,
+)
 
 # In[2]:
 logging.basicConfig(format='%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
@@ -161,7 +181,7 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
-            
+
             # if step > 100:
             #     break
 
@@ -174,7 +194,7 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
             answer_starts = np.asarray(
                 batch['answer_start']).reshape(-1).tolist()
             query_reps = gen_query_reps(args, model, batch)
-            
+
             # logger.info(f"Query Rep {query_reps.shape}")
 
             retrieval_results = retrieve(args, qids, qid_to_idx, query_reps,
@@ -196,7 +216,7 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
 
 
             model.train()
-            
+
             inputs = {'query_input_ids': batch['query_input_ids'].to(args.device),
                       'query_attention_mask': batch['query_attention_mask'].to(args.device),
                       'query_token_type_ids': batch['query_token_type_ids'].to(args.device),
@@ -212,11 +232,11 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
             else:
                 retriever_loss.backward()
 
-            
+
             reader_batch = gen_reader_features_v2(qids, question_texts, answer_texts, answer_starts,
                                         pids_for_reader, passages_for_reader, labels_for_reader,
-                                        reader_tokenizer, args.reader_max_seq_length, 
-                                        is_training=True, 
+                                        reader_tokenizer, args.reader_max_seq_length,
+                                        is_training=True,
                                         itemid_modalities=itemid_modalities,
                                         item_id_to_idx=item_id_to_idx,
                                         images_titles=images_titles)
@@ -229,7 +249,7 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
             # batch['query_attention_mask'] = batch['query_attention_mask'].to(args.device)
             # batch['query_token_type_ids'] = batch['query_token_type_ids'].to(args.device)
 
-            mbatch_ds = TensorDataset(reader_batch['input_ids'], 
+            mbatch_ds = TensorDataset(reader_batch['input_ids'],
                                 reader_batch['input_mask'],
                                 reader_batch['segment_ids'],
                                 reader_batch['start_positions'],
@@ -238,7 +258,7 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
                                 reader_batch['image_input'],
             )
 
-            mbatch_dl = DataLoader(mbatch_ds, batch_size=32, num_workers=4)
+            mbatch_dl = DataLoader(mbatch_ds, batch_size=10, num_workers=4)
 
             for mini_batch in tqdm(mbatch_dl, desc="Mini-Batch", leave=False, disable=True):
                 # continue
@@ -397,7 +417,7 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
                             prepend_history_questions=args.prepend_history_questions,
                             prepend_history_answers=args.prepend_history_answers,
                            given_query=True,
-                           given_passage=False, 
+                           given_passage=False,
                            include_first_for_retriever=args.include_first_for_retriever)
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
@@ -428,9 +448,9 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
     all_results = []
     start_time = timeit.default_timer()
 
-    
+
     for b_idx, batch in tqdm(enumerate(eval_dataloader), desc="Evaluating", total=len(eval_dataloader)):
-        
+
         # if b_idx > 15:
         #     break
 
@@ -448,7 +468,7 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
                                      item_ids, item_id_to_idx, item_reps,
                                      qrels, qrels_sparse_matrix,
                                      gpu_index, include_positive_passage=False)
-        
+
         pids_for_retriever = retrieval_results['pids_for_retriever']
 
         retriever_probs = retrieval_results['retriever_probs']
@@ -458,7 +478,7 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
             retriever_run_dict[qids[i]] = {}
             for j in range(retrieval_results['no_cut_retriever_probs'].shape[1]):
                 retriever_run_dict[qids[i]][pids_for_retriever[i, j]] = int(retrieval_results['no_cut_retriever_probs'][i,j])
-        
+
         pids_for_reader = retrieval_results['pids_for_reader']
         passages_for_reader = retrieval_results['passages_for_reader']
         labels_for_reader = retrieval_results['labels_for_reader']
@@ -472,9 +492,9 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
                                                                            itemid_modalities=itemid_modalities,
                                                                            item_id_to_idx=item_id_to_idx,
                                                                            images_titles=images_titles)
-        
-        
-        mbatch_ds = TensorDataset(reader_batch['input_ids'], 
+
+
+        mbatch_ds = TensorDataset(reader_batch['input_ids'],
                                 reader_batch['input_mask'],
                                 reader_batch['segment_ids'],
                                 reader_batch['image_input'],
@@ -485,18 +505,18 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
 
 
         example_ids = reader_batch['example_id']
-        
+
         # logger.info(f"Example IDS {len(example_ids)}")
         # logger.info(f"Example IDS {(example_ids)}")
 
         # logger.info(f"Batch examples {len(batch_examples)}")
         # logger.info(f"Batch feature {len(batch_features)}")
         # logger.info(f"IDS {reader_batch['input_ids'].shape}")
-        
+
 
         examples.update(batch_examples)
         features.update(batch_features)
-        
+
         retriever_probs = retriever_probs.reshape(-1).tolist()
 
         example_ptr = 0
@@ -511,20 +531,20 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
                         'image_input': mini_batch[3].to(args.device),
                 }
 
-                outputs = model.reader(**inputs)      
+                outputs = model.reader(**inputs)
 
 
             # logger.info(f"Start {outputs[0].shape}")
             # logger.info(f"End {outputs[1].shape}")
             # logger.info(f"Retrieval logits {outputs[2].shape} prob {len(retriever_probs)}")
-            
+
 
             for i, ptr in enumerate(range(m_bs)):
                 # logger.info(f"RawResult {example_ids[example_ptr]}")
                 result = RawResult(unique_id=example_ids[example_ptr],
                                 start_logits=to_list(outputs[0][i]),
                                 end_logits=to_list(outputs[1][i]),
-                                retrieval_logits=to_list(outputs[2][i]), 
+                                retrieval_logits=to_list(outputs[2][i]),
                                 retriever_prob=None)
                 example_ptr += 1
                 all_results.append(result)
@@ -536,22 +556,22 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
     logger.info(f"Results {len(all_results)}")
 
     # jb.dump([examples, features, all_results], "/home/priyansk/D.pkl")
-    
+
     # examples, features, all_result = jb.load("/home/priyansk/D.pkl")
-    
+
     # logger.info(f"Examples {len(examples)}")
     # logger.info(f"Features {len(features)}")
     # logger.info(f"Results {len(all_results)}")
-    
+
     # for x in all_results[:5]:
     #     logger.info(f'Res {x.start_logits} {x.end_logits}')
-    
+
 
     evalTime = timeit.default_timer() - start_time
     logger.info("  Evaluation done in total %f secs (%f sec per example)",
                 evalTime, evalTime / len(dataset))
 
-    predict_dir = "/home/priyansk/dummy"
+    # predict_dir = "/home/priyansk/dummy"
     output_prediction_file = os.path.join(
         predict_dir, "instance_predictions_{}.json".format(prefix))
     output_nbest_file = os.path.join(
@@ -565,18 +585,18 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
         output_null_log_odds_file = None
 
 
-    all_predictions = write_predictions_v2(reader_tokenizer, examples, features, all_results, 
-                                        args.n_best_size, args.max_answer_length, args.do_lower_case, 
+    all_predictions = write_predictions_v2(reader_tokenizer, examples, features, all_results,
+                                        args.n_best_size, args.max_answer_length, args.do_lower_case,
                                         output_prediction_file,
-                                        output_nbest_file, 
+                                        output_nbest_file,
                                         output_null_log_odds_file,
                                         args.verbose_logging,
-                                        args.version_2_with_negative, 
+                                        args.version_2_with_negative,
                                         args.null_score_diff_threshold)
-    
 
-    write_final_predictions(all_predictions, output_final_prediction_file, 
-                            use_rerank_prob=args.use_rerank_prob, 
+
+    write_final_predictions(all_predictions, output_final_prediction_file,
+                            use_rerank_prob=args.use_rerank_prob,
                             use_retriever_prob=args.use_retriever_prob)
     eval_metrics = quac_eval(
         args, orig_eval_file, output_final_prediction_file)
@@ -603,7 +623,7 @@ def evaluate(args, model, retriever_tokenizer, reader_tokenizer, prefix=""):
 
 def gen_query_reps(args, model, batch):
     model.eval()
-    batch = {k: v.to(args.device) for k, v in batch.items() 
+    batch = {k: v.to(args.device) for k, v in batch.items()
              if k not in ['example_id', 'qid', 'question_text', 'answer_text', 'answer_start']}
     with torch.no_grad():
         inputs = {}
@@ -655,7 +675,7 @@ def retrieve(args, qids, qid_to_idx, query_reps,
     qidx_expanded = np.expand_dims(qidx, axis=1)
     qidx_expanded = np.repeat(qidx_expanded, args.top_k_for_reader, axis=1)
     # print('qidx_expanded', qidx_expanded)
-    
+
     labels_for_reader = qrels_sparse_matrix[qidx_expanded, pidx_for_reader].toarray()
     # print('labels_for_reader before', labels_for_reader)
     # print('labels_for_reader before', labels_for_reader)
@@ -684,7 +704,7 @@ def retrieve(args, qids, qid_to_idx, query_reps,
             'retriever_probs': retriever_probs,
             'pidx_for_reader': pidx_for_reader,
             'pids_for_reader': pids_for_reader,
-            'passages_for_reader': passages_for_reader, 
+            'passages_for_reader': passages_for_reader,
             'labels_for_reader': labels_for_reader,
             'no_cut_retriever_probs':D}
 
@@ -721,23 +741,23 @@ parser.add_argument("--test_file", default='/home/share/liyongqi/project/MMCoQA/
                     type=str, required=False,
                     help="open retrieval quac json for predictions.")
 
-parser.add_argument("--passages_file", 
+parser.add_argument("--passages_file",
                     default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/texts/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_texts.jsonl', type=str,
                     help="the file contains passages")
-parser.add_argument("--tables_file", 
+parser.add_argument("--tables_file",
                     default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/tables/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_tables.jsonl', type=str,
                     help="the file contains passages")
-parser.add_argument("--images_file", 
+parser.add_argument("--images_file",
                     default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/images/multimodalqa_final_dataset_pipeline_camera_ready_MMQA_images.jsonl', type=str,
                     help="the file contains passages")
 
 parser.add_argument("--qrels", default='/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/QA pairs/qrels.txt', type=str, required=False,
                     help="qrels to evaluate open retrieval")
-parser.add_argument("--images_path", 
+parser.add_argument("--images_path",
                     default="/home/share/liyongqi/project/MMCoQA/data/MMCoQA_data/final_data/multimodal_evidence_collection/images/final_dataset_images/", type=str,
                     help="the path to images")
 
-parser.add_argument("--gen_passage_rep_output", 
+parser.add_argument("--gen_passage_rep_output",
                     default='./retriever_release_test/dev_blocks.txt', type=str,
                     help="passage representations")
 parser.add_argument("--output_dir", default='./release_test', type=str, required=False,
@@ -900,6 +920,10 @@ parser.add_argument("--use_rerank_prob", default=True, type=str2bool,
 
 args, unknown = parser.parse_known_args()
 
+
+print('Received the following args:')
+print(args)
+
 if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
     raise ValueError(
         "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -920,14 +944,16 @@ if args.server_ip and args.server_port:
 if args.local_rank == -1 or args.no_cuda:
     device = torch.device(
         "cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-    # args.n_gpu = torch.cuda.device_count()
-    args.n_gpu = 1
+    args.n_gpu = torch.cuda.device_count()
+    # args.n_gpu = 1
     # torch.cuda.set_device(0)
 else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
     torch.cuda.set_device(args.local_rank)
     device = torch.device("cuda", args.local_rank)
     torch.distributed.init_process_group(backend='nccl')
     args.n_gpu = 1
+
+print(f'Number of gpus: {args.n_gpu}')
 args.device = device
 
 # Setup logging
@@ -1089,7 +1115,7 @@ item_reps = np.asarray(item_reps, dtype='float32')
 item_ids=np.asarray(item_ids)
 
 logger.info('constructing passage faiss_index')
-faiss_res = faiss.StandardGpuResources() 
+faiss_res = faiss.StandardGpuResources()
 index = faiss.IndexFlatIP(args.proj_size)
 index.add(item_reps)
 #gpu_index = faiss.index_cpu_to_gpu(faiss_res, 0, index)
@@ -1139,7 +1165,7 @@ if args.do_train:
                                  prepend_history_questions=args.prepend_history_questions,
                                  prepend_history_answers=args.prepend_history_answers,
                                  given_query=True,
-                                 given_passage=False, 
+                                 given_passage=False,
                                  include_first_for_retriever=args.include_first_for_retriever)
     global_step, tr_loss = train(
         args, train_dataset, model, retriever_tokenizer, reader_tokenizer)
@@ -1277,9 +1303,9 @@ if args.do_eval and args.local_rank in [-1, 0]:
 # In[12]:
 
 
-if args.do_test and args.local_rank in [-1, 0]:    
+if args.do_test and args.local_rank in [-1, 0]:
     if args.do_eval:
-        best_global_step = best_metrics['global_step'] 
+        best_global_step = best_metrics['global_step']
     else:
         best_global_step = args.best_global_step
         # retriever_tokenizer = retriever_tokenizer_class.from_pretrained(

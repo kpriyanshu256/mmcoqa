@@ -3,37 +3,47 @@
 from __future__ import absolute_import, division, print_function
 
 import os
+
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="5"
-import logging
-import os
-import random
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 import glob
 import json
+import logging
+import os
 import pickle
+import random
+
 import numpy as np
 import torch
-
+import train_options
 from PIL import Image
-
-from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
-                              TensorDataset)
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
-import train_options 
 
 try:
     from torch.utils.tensorboard import SummaryWriter
 except:
     from tensorboardX import SummaryWriter
 
-from tqdm import tqdm, trange
-
-from transformers import WEIGHTS_NAME, BertConfig, BertTokenizer, AlbertConfig, AlbertTokenizer
-from transformers import AdamW, get_linear_schedule_with_warmup
-from retriever_utils import RetrieverDataset, GenPassageRepDataset
-from modeling import BertForRetrieverOnlyPositivePassage,AlbertForRetrieverOnlyPositivePassage
-from evaluate_models import evaluate_retriever, gen_passage_rep
 import warnings
+
+from evaluate_models import evaluate_retriever, gen_passage_rep
+from modeling import (
+    AlbertForRetrieverOnlyPositivePassage,
+    BertForRetrieverOnlyPositivePassage,
+)
+from retriever_utils import GenPassageRepDataset, RetrieverDataset
+from tqdm import tqdm, trange
+from transformers import (
+    WEIGHTS_NAME,
+    AdamW,
+    AlbertConfig,
+    AlbertTokenizer,
+    BertConfig,
+    BertTokenizer,
+    get_linear_schedule_with_warmup,
+)
+
 warnings.filterwarnings("ignore")
 
 
@@ -59,6 +69,7 @@ def to_list(tensor):
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
+    print('Training the model now')
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter(os.path.join(args.output_dir, 'logs'))
 
@@ -136,11 +147,11 @@ def train(args, train_dataset, model, tokenizer):
             inputs = {}
             if args.given_query:
                 inputs['query_input_ids'] = batch['query_input_ids']
-                inputs['query_attention_mask'] = batch['query_attention_mask']        
+                inputs['query_attention_mask'] = batch['query_attention_mask']
                 inputs['query_token_type_ids'] = batch['query_token_type_ids']
             if args.given_passage:
                 inputs['passage_input_ids'] = batch['passage_input_ids']
-                inputs['passage_attention_mask'] = batch['passage_attention_mask']        
+                inputs['passage_attention_mask'] = batch['passage_attention_mask']
                 inputs['passage_token_type_ids'] = batch['passage_token_type_ids']
                 inputs['retrieval_label'] = batch['retrieval_label']
                 inputs['question_type'] = batch['question_type']
@@ -194,7 +205,7 @@ def train(args, train_dataset, model, tokenizer):
                     # Save model checkpoint
                     output_dir = os.path.join(
                         args.output_dir, 'checkpoint-{}'.format(global_step))
-                    
+
                     os.makedirs(output_dir, exist_ok=True)
                     # Take care of distributed/parallel training
                     model_to_save = model.module if hasattr(
@@ -255,7 +266,7 @@ def retrieve(args, model, tokenizer, prefix=''):
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
         # model.to(f'cuda:{model.device_ids[0]}')
-        
+
     # Eval!
     logger.info("***** Retrieve {} *****".format(prefix))
     logger.info("  Num examples = %d", len(dataset))
@@ -306,6 +317,11 @@ if __name__ == "__main__":
         device = torch.device(
             "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
         args.n_gpu = torch.cuda.device_count()
+        print('args.n_gpu', args.n_gpu)
+        print(torch.cuda.is_available())
+        print(device)
+        print(torch.cuda.get_device_name(0))
+
         torch.cuda.set_device(0)
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
@@ -432,7 +448,7 @@ if __name__ == "__main__":
                                     passage_max_seq_length=args.passage_max_seq_length,
                                     is_pretraining=True,
                                     given_query=True,
-                                    given_passage=True, 
+                                    given_passage=True,
                                     only_positive_passage=args.only_positive_passage,
                                     passages_dict=passages_dict,
                                     tables_dict=tables_dict,
@@ -519,7 +535,7 @@ if __name__ == "__main__":
             args.output_dir, 'predictions', 'best_metrics.json')
         with open(best_metrics_file, 'w') as fout:
             json.dump(best_metrics, fout)
-            
+
         all_results_file = os.path.join(
             args.output_dir, 'predictions', 'all_results.json')
         with open(all_results_file, 'w') as fout:
@@ -560,7 +576,7 @@ if __name__ == "__main__":
 
         # Evaluate
         gen_passage_rep(args, model, tokenizer)
-        
+
         logger.info("Gen passage rep complete")
 
 
@@ -578,7 +594,7 @@ if __name__ == "__main__":
     #     # Evaluate
     #     qids, query_reps = retrieve(args, model, tokenizer)
     #     query_reps = np.asarray(query_reps, dtype='float32')
-        
+
     #     logger.info("Gen query rep complete")
 
 

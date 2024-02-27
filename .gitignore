@@ -3,6 +3,9 @@ data/
 sid/
 logs/
 retriever_checkpoint/
+test_rep/
+.vscode/
+reader_fix/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

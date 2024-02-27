@@ -1,21 +1,24 @@
 from __future__ import absolute_import, division, print_function
-import sys
+
+import collections
 import json
+import linecache
 import logging
 import math
-import collections
-import linecache
-import numpy as np
+import sys
 from io import open
-from tqdm import tqdm
-from torch.utils.data import Dataset
 from pprint import pprint
-# from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
 
-from PIL import Image
 import cv2
+import numpy as np
 import torch
 import torchvision
+from PIL import Image
+from torch.utils.data import Dataset
+from tqdm import tqdm
+
+# from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
+
 
 # Required by XLNet evaluation method to compute optimal threshold (see write_predictions_extended() method)
 # from utils_squad_evaluate import find_all_best_thresh_v2, make_qid_to_has_ans, get_raw_scores
@@ -82,17 +85,17 @@ class RetrieverInputFeatures(object):
     def to_json_string(self):
         """Serializes this instance to a JSON string."""
         return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
-    
-    
+
+
 class RetrieverDataset(Dataset):
-    def __init__(self, filename, tokenizer, 
-                 load_small, history_num, prepend_history_questions=False, 
+    def __init__(self, filename, tokenizer,
+                 load_small, history_num, prepend_history_questions=False,
                  prepend_history_answers=False,
                  query_max_seq_length=128, passage_max_seq_length=384,
-                 is_pretraining=False, given_query=False, 
-                 given_passage=False, only_positive_passage=True, 
+                 is_pretraining=False, given_query=False,
+                 given_passage=False, only_positive_passage=True,
                  include_first_for_retriever=False,passages_dict=None,images_dict=None,tables_dict=None):
-        
+
         self._filename = filename
         self._tokenizer = tokenizer
         self._load_small = load_small
@@ -101,21 +104,21 @@ class RetrieverDataset(Dataset):
         self._passage_max_seq_length = passage_max_seq_length
         self._prepend_history_questions = prepend_history_questions
         self._prepend_history_answers = prepend_history_answers
-        
+
         # if given query:
             # if pretraining: using rewrite as question
             # else: using concat of question
-        self._is_pretraining = is_pretraining 
+        self._is_pretraining = is_pretraining
         self._given_query = given_query
         self._given_passage = given_passage
-        
+
         # if we only pass the positive passages to the model
         # the rest of the passges in the batch are considered as negatives
         self._only_positive_passage = only_positive_passage
-        
+
         self._include_first_for_retriever = include_first_for_retriever
-        
-        self._total_data = 0      
+
+        self._total_data = 0
         if self._load_small:
             self._total_data = 100
         else:
@@ -127,7 +130,7 @@ class RetrieverDataset(Dataset):
 
         self._modality_dict={'text':0,'table':0,'image':1}
 
-                
+
     def __len__(self):
         return self._total_data
 
@@ -154,10 +157,10 @@ class RetrieverDataset(Dataset):
         img = trans_f(img)
         img=img.numpy()
         return img
-                
+
     def __getitem__(self, idx):
         """read a line of preprocessed open-retrieval quac file into a quac example"""
-        line = linecache.getline(self._filename, idx + 1)    
+        line = linecache.getline(self._filename, idx + 1)
         entry = json.loads(line.strip())
         qas_id = entry["qid"]
 
@@ -165,9 +168,9 @@ class RetrieverDataset(Dataset):
         # pprint(entry)
         # print("------------")
     #    retrieval_labels = entry['retrieval_labels']
-        
+
         return_feature_dict = {}
-        
+
         # print("given query ", self._given_query)
 
         if self._given_query:
@@ -175,7 +178,7 @@ class RetrieverDataset(Dataset):
             if self._is_pretraining:
                 question_text_for_retriever = entry["gold_question"]
             else:
-                question_text_for_retriever = entry["gold_question"]
+                question_text_for_retriever = entry["gold_question"] # useless line?
                 question_text = entry["gold_question"]
 
                 orig_question_text = entry["question"]
@@ -190,51 +193,51 @@ class RetrieverDataset(Dataset):
                 question_text_list.append(orig_question_text)
                 question_text = ' [SEP] '.join(question_text_list)
                 question_text_for_retriever = question_text
-    
+
                 # include the first question in addition to history_num for retriever (not reader)
                 if self._include_first_for_retriever and len(history) > 0:
                     first_question = history[0]['question']
-                    if first_question != question_text_list[0]:                    
+                    if first_question != question_text_list[0]:
                         question_text_for_retriever = first_question + ' [SEP] ' + question_text
-                        
+
                 # print('question_text_for_retriever', question_text_for_retriever)
                 # print('question_text', question_text)
 
-                     
+
             # print('question_text_for_retriever', question_text_for_retriever)
             query_example = RetrieverInputExample(guid=qas_id, text_a=question_text_for_retriever)
-            query_feature = retriever_convert_example_to_feature(query_example, self._tokenizer, 
+            query_feature = retriever_convert_example_to_feature(query_example, self._tokenizer,
                                                                  max_length=self._query_max_seq_length)
-            query_feature_dict = {'query_input_ids': np.asarray(query_feature.input_ids), 
-                                  'query_token_type_ids': np.asarray(query_feature.token_type_ids), 
-                                  'query_attention_mask': np.asarray(query_feature.attention_mask), 
+            query_feature_dict = {'query_input_ids': np.asarray(query_feature.input_ids),
+                                  'query_token_type_ids': np.asarray(query_feature.token_type_ids),
+                                  'query_attention_mask': np.asarray(query_feature.attention_mask),
                                   'qid': qas_id}
             # during fine-tuning, we also return the query text for training reader
             if not self._is_pretraining:
                 query_feature_dict['question_text'] = question_text
                 query_feature_dict['answer_text'] = entry['answer'][0]['answer']
                 query_feature_dict['answer_start'] = 0
-            
+
             return_feature_dict.update(query_feature_dict)
 
             if entry['question_type']=="text":
                 modality_label=0
             elif entry['question_type']=="table":
-                modality_label=1        
+                modality_label=1
             else:
-                modality_label=2 
+                modality_label=2
             return_feature_dict.update({'modality_label':modality_label})
 
         # print("given passage ", self._given_passage)
 
         if self._given_passage:
             return_feature_dict['question_type']=self._modality_dict[entry['question_type']]
-            
+
             # print(self._only_positive_passage)
 
             if self._only_positive_passage:
-                
-                if entry['question_type']=="text":  
+
+                if entry['question_type']=="text":
 
 
                     passage_id=entry['answer'][0]['text_instances'][0]['doc_id']
@@ -250,21 +253,21 @@ class RetrieverDataset(Dataset):
                                             text_a=passage,
                                             label=1)
 
-                    passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer, 
+                    passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer,
                                                                            max_length=self._passage_max_seq_length)
 
 
 
-                    passage_feature_dict = {'passage_input_ids': np.asarray(passage_feature.input_ids), 
-                                     'passage_token_type_ids': np.asarray(passage_feature.token_type_ids), 
+                    passage_feature_dict = {'passage_input_ids': np.asarray(passage_feature.input_ids),
+                                     'passage_token_type_ids': np.asarray(passage_feature.token_type_ids),
                                      'passage_attention_mask': np.asarray(passage_feature.attention_mask),
-                                     'retrieval_label': passage_feature.label, 
+                                     'retrieval_label': passage_feature.label,
                                      'example_id': example_id,
                                      'image_input':np.zeros([3,512,512])}
                     return_feature_dict.update(passage_feature_dict)
 
-                elif entry['question_type']=="image":  
-                  
+                elif entry['question_type']=="image":
+
                     image_id=entry['answer'][0]['image_instances'][0]['doc_id']
 
 
@@ -277,10 +280,10 @@ class RetrieverDataset(Dataset):
                     example_id = '{}_{}'.format(qas_id, image_id)
 
 
-                    passage_feature_dict = {'passage_input_ids': np.asarray([0]*self._passage_max_seq_length), 
-                                     'passage_token_type_ids': np.asarray([0]*self._passage_max_seq_length), 
+                    passage_feature_dict = {'passage_input_ids': np.asarray([0]*self._passage_max_seq_length),
+                                     'passage_token_type_ids': np.asarray([0]*self._passage_max_seq_length),
                                      'passage_attention_mask': np.asarray([0]*self._passage_max_seq_length),
-                                     'retrieval_label': 1, 
+                                     'retrieval_label': 1,
                                      'example_id': example_id,
                                      'image_input':img}
                     return_feature_dict.update(passage_feature_dict)
@@ -295,12 +298,12 @@ class RetrieverDataset(Dataset):
                                             text_a=table,
                                             label=1)
 
-                    table_feature = retriever_convert_example_to_feature(table_example, self._tokenizer, 
+                    table_feature = retriever_convert_example_to_feature(table_example, self._tokenizer,
                                                                            max_length=self._passage_max_seq_length)
-                    passage_feature_dict = {'passage_input_ids': np.asarray(table_feature.input_ids), 
-                                     'passage_token_type_ids': np.asarray(table_feature.token_type_ids), 
+                    passage_feature_dict = {'passage_input_ids': np.asarray(table_feature.input_ids),
+                                     'passage_token_type_ids': np.asarray(table_feature.token_type_ids),
                                      'passage_attention_mask': np.asarray(table_feature.attention_mask),
-                                     'retrieval_label': table_feature.label, 
+                                     'retrieval_label': table_feature.label,
                                      'example_id': example_id,
                                      'image_input':np.zeros([3,512,512])}
                     return_feature_dict.update(passage_feature_dict)
@@ -308,23 +311,23 @@ class RetrieverDataset(Dataset):
         # sys.exit(0)
 
         return return_feature_dict
-    
+
 class GenPassageRepDataset(Dataset):
-    def __init__(self, filename, tokenizer, 
+    def __init__(self, filename, tokenizer,
                  load_small, passage_max_seq_length=386,passages_dict=None,images_dict=None,tables_dict=None, idx_id_list=None):
-        
+
 
         self._tokenizer = tokenizer
-        self._load_small = load_small  
+        self._load_small = load_small
         self._passage_max_seq_length = passage_max_seq_length
 
 
         self._passages_dict=passages_dict
         self._images_dict=images_dict
-        self._tables_dict=tables_dict 
+        self._tables_dict=tables_dict
         self._idx_id_list=idx_id_list
 
-        self._total_data = 0      
+        self._total_data = 0
         if self._load_small:
             self._total_data = 100
         else:
@@ -358,10 +361,10 @@ class GenPassageRepDataset(Dataset):
             img = torch.zeros((3, 224, 224))
         img=img.numpy()
         return img
-                
+
     def __len__(self):
         return self._total_data
-                
+
     def __getitem__(self, idx):
         """read a line of preprocessed open-retrieval quac file into a quac example"""
 
@@ -370,10 +373,10 @@ class GenPassageRepDataset(Dataset):
             example_id=self._idx_id_list[idx][0]
 
             passage_example = RetrieverInputExample(guid=example_id, text_a=passage)
-            passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer, 
+            passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer,
                                                                    max_length=self._passage_max_seq_length)
-            batch_feature = {'passage_input_ids': np.asarray(passage_feature.input_ids), 
-                             'passage_token_type_ids': np.asarray(passage_feature.token_type_ids), 
+            batch_feature = {'passage_input_ids': np.asarray(passage_feature.input_ids),
+                             'passage_token_type_ids': np.asarray(passage_feature.token_type_ids),
                              'passage_attention_mask': np.asarray(passage_feature.attention_mask),
                              'example_id': example_id,
                              'image_input':np.zeros([3,512,512])}
@@ -382,10 +385,10 @@ class GenPassageRepDataset(Dataset):
             example_id=self._idx_id_list[idx][0]
 
             passage_example = RetrieverInputExample(guid=example_id, text_a=passage)
-            passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer, 
+            passage_feature = retriever_convert_example_to_feature(passage_example, self._tokenizer,
                                                                    max_length=self._passage_max_seq_length)
-            batch_feature = {'passage_input_ids': np.asarray(passage_feature.input_ids), 
-                             'passage_token_type_ids': np.asarray(passage_feature.token_type_ids), 
+            batch_feature = {'passage_input_ids': np.asarray(passage_feature.input_ids),
+                             'passage_token_type_ids': np.asarray(passage_feature.token_type_ids),
                              'passage_attention_mask': np.asarray(passage_feature.attention_mask),
                              'example_id': example_id,
                              'image_input':np.zeros([3,512,512])}
@@ -395,8 +398,8 @@ class GenPassageRepDataset(Dataset):
 
             img=self._image_transform(image_path)
 
-            batch_feature = {'passage_input_ids': np.asarray([0]*self._passage_max_seq_length), 
-                             'passage_token_type_ids': np.asarray([0]*self._passage_max_seq_length), 
+            batch_feature = {'passage_input_ids': np.asarray([0]*self._passage_max_seq_length),
+                             'passage_token_type_ids': np.asarray([0]*self._passage_max_seq_length),
                              'passage_attention_mask': np.asarray([0]*self._passage_max_seq_length),
                              'example_id': example_id,
                              'image_input':img}
