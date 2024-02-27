@@ -1,6 +1,6 @@
 
 import numpy as np
-import tqdm, json, os
+import json
 import os
 import torch
 import faiss
@@ -8,7 +8,7 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from retriever_utils import RetrieverDataset, GenPassageRepDataset
 import timeit
-
+from tqdm import tqdm
 import pytrec_eval
 
 def gen_passage_rep(args, model, tokenizer, logger, passages_dict, tables_dict, images_dict, idx_id_list):
