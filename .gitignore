@@ -6,6 +6,9 @@ retriever_checkpoint/
 test_rep/
 .vscode/
 reader_fix/
+no_table/
+no_text/
+experiments/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

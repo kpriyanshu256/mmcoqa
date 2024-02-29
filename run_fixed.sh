@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=fix
+#SBATCH --job-name=frepr
 #SBATCH --output=logs/output_%A.log
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
@@ -17,8 +17,8 @@ conda activate mmcoqa
 echo "On host $(hostname)"
 nvidia-smi
 
-D=./reader_fix
-D1=./test_rep
+D=./fixed_repr
+D1=./orig_retriever_checkpoint
 
 mkdir $D
 
@@ -73,7 +73,7 @@ python3 code-fixed/MMCoQA/train_updated.py \
 --num_train_epochs 1 \
 --retrieve_tokenizer_dir $D1 \
 --use_retriever_prob False \
---save_steps 300 \
+--save_steps 2000 \
 --num_workers 4 \
 --do_train True \
 --top_k_for_retriever 1000 \
