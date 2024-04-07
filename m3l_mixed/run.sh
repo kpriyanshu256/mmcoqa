@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rtp_1
-#SBATCH --output=m3l_mixed.out
-#SBATCH --error=m3l_mixed.err
-#SBATCH --mem=32g
+#SBATCH --output=m3l_mixed_no_ret.out
+#SBATCH --error=m3l_mixed_no_ret.err
+#SBATCH --mem=64g
 #SBATCH --gres=gpu:A6000:1
 #SBATCH --time=24:00:00
 #SBATCH --mail-type=ALL
@@ -11,13 +11,13 @@
 source /home/priyansk/.bashrc
 conda activate m3l
 
-D=/data/tir/projects/tir7/user_data/priyansk/m3l_mixed_1
-D1=/data/tir/projects/tir7/user_data/priyansk/m3l_fix
+D1=/data/tir/projects/tir7/user_data/priyansk/m3l_mixed
+D=/data/tir/projects/tir7/user_data/priyansk/m3l_mixed_no_ret
 
 mkdir $D
 
 
-# python3 /home/priyansk/m3l_self/train_retriever.py \
+# python3 /home/priyansk/m3l_mixed/train_retriever.py \
 # --train_file /data/tir/projects/tir7/user_data/priyansk/MMCoQA/MMCoQA/MMCoQA_train.txt \
 # --dev_file /data/tir/projects/tir7/user_data/priyansk/MMCoQA/MMCoQA/MMCoQA_dev.txt \
 # --test_file /data/tir/projects/tir7/user_data/priyansk/MMCoQA/MMCoQA/MMCoQA_test.txt \
@@ -35,7 +35,7 @@ mkdir $D
 # --num_train_epochs 22 \
 # # --do_train False \
 
-# python3 /home/priyansk/m3l_self/train_retriever.py \
+# python3 /home/priyansk/m3l_mixed/train_retriever.py \
 # --gen_passage_rep True \
 # --retrieve_checkpoint $D/checkpoint-5061 \
 # --train_file /data/tir/projects/tir7/user_data/priyansk/MMCoQA/MMCoQA/MMCoQA_train.txt \
@@ -72,10 +72,12 @@ python3 /home/priyansk/m3l_mixed/train_pipeline.py \
 --output_dir $D \
 --num_train_epochs 1 \
 --use_retriever_prob False \
---save_steps 500 \
+--save_steps 1000 \
 --num_workers 8 \
 --top_k_for_reader 5 \
 --num_train_epochs 1 \
---do_train True \
+# --do_train False \
+# --do_eval False \
+# --best_global_step 1000 \
 
 

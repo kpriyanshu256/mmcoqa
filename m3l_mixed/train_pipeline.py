@@ -232,6 +232,21 @@ def train(args, train_dataset, model, retriever_tokenizer, reader_tokenizer):
 
             model.train()
 
+
+            # inputs = {'query_input_ids': batch['query_input_ids'].to(args.device),
+            #           'query_attention_mask': batch['query_attention_mask'].to(args.device),
+            #           'query_token_type_ids': batch['query_token_type_ids'].to(args.device),
+            #           'passage_rep': torch.from_numpy(passage_reps_for_retriever).to(args.device),
+            #           'retrieval_label': torch.from_numpy(labels_for_retriever).to(args.device)}
+            # retriever_outputs = model.retriever(**inputs)
+            # retriever_loss = retriever_outputs[0]
+            # # retriever_loss = torch.tensor([0.0])
+
+            
+            # retriever_loss.backward()
+
+
+
             reader_batch = gen_reader_features_v2(
                                     qids, question_texts, answer_texts, answer_starts,
                                     pids_for_reader, passages_for_reader, labels_for_reader,
@@ -853,7 +868,8 @@ if args.do_test:
     model.retriever.image_encoder = None
     model.retriever.image_proj = None
 
-    model.reader = reader_model_class.from_pretrained(os.path.join(checkpoint, 'reader'))
+    model.reader = Reader.from_pretrained(args.reader_model_name_or_path, os.path.join(checkpoint, 'reader'), reader_config)
+
 
     model.to(args.device)
 
